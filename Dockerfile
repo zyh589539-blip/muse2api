@@ -10,7 +10,6 @@ ENV DEBIAN_FRONTEND=noninteractive \
     MUSE2API_CDP_PORT=19210
 
 WORKDIR /app
-
 # 安装 Chromium、中文字体与核心依赖
 RUN apt-get update && apt-get install -y --no-install-recommends \
     chromium \
@@ -31,11 +30,8 @@ COPY admin.html app.py cdp.py config.py engine.py store.py proxy.py version.json
 COPY deploy/ ./deploy/
 COPY extension/ ./extension/
 COPY tools/ ./tools/
-
 # 创建持久化数据目录
 RUN mkdir -p /app/data/media /app/data/downloads /root/muse2api-profiles
-
-VOLUME ["/app/data"]
 
 EXPOSE 18610
 
