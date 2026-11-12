@@ -350,55 +350,55 @@ class MuseEngine:
         with self._start_lock:
             if self.proc and self.proc.poll() is None and self.browser:
                 return
-        env = dict(os.environ)
-        env.setdefault("HOME", self.cfg.home_dir)
-        env["PATH"] = (self.cfg.extra_path + os.pathsep + env.get("PATH", "")) if self.cfg.extra_path else env.get("PATH", "")
-        args = [
-            self.cfg.chromium,
-            "--headless=new", "--no-sandbox", "--disable-gpu",
-            "--disable-dev-shm-usage", "--disable-background-networking",
-            "--no-first-run", "--no-default-browser-check",
-            "--autoplay-policy=no-user-gesture-required",
-            "--window-size=1440,2400",
-            f"--remote-debugging-port={self.cfg.cdp_port}",
-            "--remote-allow-origins=*",
-            f"--user-data-dir={self.cfg.profile_dir}",
-            "about:blank",
-        ]
-        # 尝试复用已有健康 CDP
-        if not self.proc:
-            try:
-                v = http_json(self._debug_url(), timeout=1)
-                if v and "webSocketDebuggerUrl" in v:
-                    self.browser = CDP(v["webSocketDebuggerUrl"], timeout=180)
-                    return
-            except Exception:
-                pass
-
-        # 清理残留锁
-        for lock_name in ("SingletonLock", "SingletonSocket", "SingletonCookie"):
-            lp = os.path.join(self.cfg.profile_dir, lock_name)
-            if os.path.exists(lp) or os.path.islink(lp):
+            env = dict(os.environ)
+            env.setdefault("HOME", self.cfg.home_dir)
+            env["PATH"] = (self.cfg.extra_path + os.pathsep + env.get("PATH", "")) if self.cfg.extra_path else env.get("PATH", "")
+            args = [
+                self.cfg.chromium,
+                "--headless=new", "--no-sandbox", "--disable-gpu",
+                "--disable-dev-shm-usage", "--disable-background-networking",
+                "--no-first-run", "--no-default-browser-check",
+                "--autoplay-policy=no-user-gesture-required",
+                "--window-size=1440,2400",
+                f"--remote-debugging-port={self.cfg.cdp_port}",
+                "--remote-allow-origins=*",
+                f"--user-data-dir={self.cfg.profile_dir}",
+                "about:blank",
+            ]
+            # 尝试复用已有健康 CDP
+            if not self.proc:
                 try:
-                    os.unlink(lp)
+                    v = http_json(self._debug_url(), timeout=1)
+                    if v and "webSocketDebuggerUrl" in v:
+                        self.browser = CDP(v["webSocketDebuggerUrl"], timeout=180)
+                        return
                 except Exception:
                     pass
 
-        os.makedirs(self.cfg.data_dir, exist_ok=True)
-        self._log = open(os.path.join(self.cfg.data_dir, "chromium.log"), "ab", buffering=0)
-        cwd_dir = self.cfg.home_dir if (self.cfg.home_dir and os.path.isdir(self.cfg.home_dir)) else None
-        self.proc = subprocess.Popen(args, stdout=self._log, stderr=subprocess.STDOUT,
-                                     env=env, cwd=cwd_dir)
-        last = None
-        for _ in range(90):
-            try:
-                v = http_json(self._debug_url(), timeout=2)
-                self.browser = CDP(v["webSocketDebuggerUrl"], timeout=180)
-                return
-            except Exception as exc:  # noqa: BLE001
-                last = exc
-                time.sleep(1)
-        raise MuseGenerationError(f"Chromium 启动失败: {last}")
+            # 清理残留锁
+            for lock_name in ("SingletonLock", "SingletonSocket", "SingletonCookie"):
+                lp = os.path.join(self.cfg.profile_dir, lock_name)
+                if os.path.exists(lp) or os.path.islink(lp):
+                    try:
+                        os.unlink(lp)
+                    except Exception:
+                        pass
+
+            os.makedirs(self.cfg.data_dir, exist_ok=True)
+            self._log = open(os.path.join(self.cfg.data_dir, "chromium.log"), "ab", buffering=0)
+            cwd_dir = self.cfg.home_dir if (self.cfg.home_dir and os.path.isdir(self.cfg.home_dir)) else None
+            self.proc = subprocess.Popen(args, stdout=self._log, stderr=subprocess.STDOUT,
+                                         env=env, cwd=cwd_dir)
+            last = None
+            for _ in range(90):
+                try:
+                    v = http_json(self._debug_url(), timeout=2)
+                    self.browser = CDP(v["webSocketDebuggerUrl"], timeout=180)
+                    return
+                except Exception as exc:  # noqa: BLE001
+                    last = exc
+                    time.sleep(1)
+            raise MuseGenerationError(f"Chromium 启动失败: {last}")
 
     def stop(self):
         with self._start_lock:
@@ -1014,11 +1014,52 @@ class MuseEngine:
     # 检查「文字真的进了输入框 + Send 按钮真的被渲染出来」。
     # 两个条件缺一不可：Send 按钮只有 React state 里有文字才会渲染 ——
     # 它在，就说明 React 真的收到了输入（不是 DOM value 被改了而已）。
+    _SEND_BUTTON_JS = r"""(function(){
+        function visible(e){
+            return e.getClientRects().length > 0
+                && getComputedStyle(e).visibility !== 'hidden';
+        }
+        var ta = document.activeElement;
+        if (!ta || !ta.matches('textarea') || !visible(ta)) {
+            ta = Array.from(document.querySelectorAll('textarea')).find(visible);
+        }
+        if (!ta) return null;
+        var label = /^(?:send(?:\s+message)?|发送(?:消息)?|發送(?:訊息)?|傳送(?:訊息)?|送出)$/i;
+        var testId = /^(?:hatch-composer-send-button|composer-send-button|send-button)$/i;
+        function isSend(b){
+            // The Send button itself uses the bg-chat-user-bubble color class.
+            // Exclude message containers, not buttons carrying that color token.
+            if (!visible(b) || b.closest('aside,nav,[role="navigation"],'
+                + 'div[class*="chat-user-bubble"],div[class*="group/msg"],'
+                + 'div[class*="hatch-chat-groupable-bubble"]')) return false;
+            return label.test((b.getAttribute('aria-label') || '').trim())
+                || testId.test((b.getAttribute('data-testid') || '').trim())
+                || label.test((b.innerText || '').trim());
+        }
+        // Search the nearest composer first. Never search the whole document:
+        // a history preview may itself contain "send", "Resend" or "Send feedback".
+        for (var r = ta.parentElement; r && r !== document.body; r = r.parentElement) {
+            var b = Array.from(r.querySelectorAll('button,[role="button"]')).find(isSend);
+            if (b) return b;
+            if (r.matches('form,main,[role="main"]')) break;
+        }
+        return null;
+    })()"""
+    _SEND_DISABLED_JS = (
+        "b.disabled || b.matches(':disabled')"
+        " || b.getAttribute('aria-disabled') === 'true' || b.closest('[inert]')"
+    )
     _SEND_STATE_JS = (
         "(function(){var ta=document.querySelector('textarea');"
-        "var b=[...document.querySelectorAll('button,[role=button]')]"
-        ".find(function(x){return /send/i.test(x.getAttribute('aria-label')||'');});"
-        "return JSON.stringify({v:ta?ta.value:'',btn:b?(b.disabled?2:1):0});})()"
+        "var b=" + _SEND_BUTTON_JS + ";"
+        "return JSON.stringify({v:ta?ta.value:'',btn:b?("
+        + _SEND_DISABLED_JS + "?2:1):0});})()"
+    )
+    _CLICK_SEND_JS = (
+        "(function(){var b=" + _SEND_BUTTON_JS + ";"
+        "if(!b)return 'no-button';"
+        "if(" + _SEND_DISABLED_JS + ")return 'disabled';"
+        "b.click();return 'clicked';})()"
     )
 
     def _send(self, prompt: str):
@@ -1069,15 +1110,7 @@ class MuseEngine:
         clicked = "no-button"
         t_deadline = time.time() + 3.0
         while time.time() < t_deadline:
-            res = self.page.js(
-                "(function(){var b=[...document.querySelectorAll('button,[role=button]')]"
-                ".filter(function(x){return x.offsetParent!==null;})"
-                ".find(function(x){return /发送|send/i.test(x.getAttribute('aria-label')||'')"
-                "||/发送|send/i.test(x.getAttribute('data-testid')||'')"
-                "||/send/i.test(x.innerText||'');});"
-                "if(!b)return 'no-button';"
-                "if(b.disabled)return 'disabled';"
-                "b.click();return 'clicked';})()")
+            res = self._click_send()
             if res == "clicked":
                 clicked = "clicked"
                 break
@@ -1103,6 +1136,27 @@ class MuseEngine:
                     pass
         time.sleep(0.3)
         return clicked
+
+    def _composer_unsent(self) -> str:
+        """输入框里还留着什么（没发出去的附件 / 文字）；空串 = 输入框是空的。读不到时按空处理（不误判）。"""
+        try:
+            n = int(self.page.js(self._ATTACHED_COUNT_JS) or 0)
+            t = int(self.page.js("(document.querySelector('textarea')||{value:''}).value.length") or 0)
+        except Exception:  # noqa: BLE001
+            return ""
+        parts = []
+        if n:
+            parts.append("%d 个附件" % n)
+        if t:
+            parts.append("%d 字提示词" % t)
+        return "、".join(parts)
+
+    def _click_send(self) -> str:
+        """只点当前输入框的发送按钮（不重新填字），不把点击等同于上游送达。"""
+        try:
+            return str(self.page.js(self._CLICK_SEND_JS))
+        except Exception:  # noqa: BLE001
+            return "error"
 
     # ---------------- 等待生成 ----------------
     def _last_attachment(self) -> dict | None:
@@ -1141,6 +1195,7 @@ class MuseEngine:
         previous_state = None
         last_activity = t_start
         progress_sent = 0
+        resent = False
         while time.time() < deadline:
             if stop_event is not None and stop_event.is_set():
                 raise MuseGenerationError("客户端已断开连接，终止生成任务")
@@ -1232,6 +1287,17 @@ class MuseEngine:
                         progress_sent = milestone
                     except Exception:
                         pass
+
+            # COOL AI 2026-11-08：发出 25 秒后模型毫无回复、输入框里还留着附件 / 文字 = 这条消息没发出去。
+            # 补点一次发送；60 秒仍没发出就报错，交给外层换号重试（以前要干等到总超时 10 分钟）。
+            if elapsed > 25.0 and cur_cnt == base_agent_cnt:
+                unsent = self._composer_unsent()
+                if unsent and not resent:
+                    resent = True
+                    log.warning("提示词发出 %.0f 秒后仍在输入框（%s），补点一次发送", elapsed, unsent)
+                    self._click_send()
+                elif unsent and elapsed > 60.0:
+                    raise MuseGenerationError("提示词没有发出去（%s 仍在输入框里），终止等待并换号重试" % unsent)
 
             if re.search(r"额度不足|积分不足|out of credits|达到上限|token limit", tail, re.I):
                 raise MuseGenerationError("账号额度不足")
